@@ -1,50 +1,113 @@
-name: Create Jira Ticket on PR
+name: Deploy Knowledge Base
 
 on:
-  pull_request_target:
-    types: [opened, reopened]
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - ".gitignore"
+      - "README.md"
+      - "CONTRIBUTING.md"
+      - "LICENSE"
 
-  workflow_dispatch:
+  pull_request:
+    branches: ["main"]
+
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  issues: write
 
 jobs:
-  create-jira-ticket:
-    name: Convert GitHub PR to Jira Issue
+  test:
+    name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Login to Jira
-        uses: atlassian/gajira-login@master
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-
-      - name: Create NEW JIRA ticket
-        id: create
-        uses: atlassian/gajira-create@v2.0.1
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          project: CONUPDATE
-          issuetype: Task
-          summary: |
-            GitHub PR | Repo: ${{ github.repository }} | PR #${{ github.event.pull_request.number }}
-          description: |
-            Repository: https://github.com/${{ github.repository }}
-            PR Number: ${{ github.event.pull_request.number }}
-            PR Title: ${{ github.event.pull_request.title }}
-            PR Description:
-            ${{ github.event.pull_request.body }}
+          node-version: 18
+          cache: npm
 
-            Please review and resolve the PR.
-          fields: >
-            {
-              "components": [{"name":"Github PR"}],
-              "customfield_16449":"https://classroom.udacity.com/",
-              "customfield_16450":"Resolve the PR",
-              "priority":{"id":"4"}
-            }
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Log created issue
-        run: echo "Jira Issue ${{ steps.create.outputs.issue }} was created"
+      - name: Run linters
+        run: npm run lint:all
+
+      - name: Run scripts
+        env:
+          URL_CHECKER_TIMEOUT: ${{ vars.URL_CHECKER_TIMEOUT }}
+        run: |
+          for script in script/*.js; do
+            node "$script" -t "$URL_CHECKER_TIMEOUT"
+          done
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build site
+        env:
+          PATH_PREFIX: /${{ github.event.repository.name }}/
+        run: npm run prod
+
+      - name: Upload build artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 5
+    environment: github-pages
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Create deployment status issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          STATUS="succeeded"
+          DATE=$(date +"%Y-%m-%d")
+
+          gh issue create \
+            --title "$DATE - Deployment: $STATUS" \
+            --body "URL: $DEPLOY_URL"
+
+              
