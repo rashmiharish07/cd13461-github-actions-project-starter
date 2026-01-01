@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 
-moduleexports = {
+module.exports = {
   random() {
     return crypto.randomUUID();
   },
